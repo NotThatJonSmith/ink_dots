@@ -27,6 +27,7 @@ def render(image):
     pixel_to_pixel_coordinates = np.indices((image.height, image.width)).transpose(1, 2, 0)
     anti_colors = np.array([[1,0,0], [0,1,0], [0,0,1], [1,1,1]], dtype=np.float32)
     for cmyk_idx in [0, 1, 2, 3]:
+
         t1 = time.time() # JDS-Comment
         angle = cmyk_angles[cmyk_idx]
         pitch = cmyk_pitches[cmyk_idx]
@@ -60,39 +61,28 @@ def render(image):
         print('2: '+'#'*round((t2-t1)*500)+f' {round((t2-t1) * 1000)}ms') # JDS-Comment
 
         t1 = time.time() # JDS-Comment
-        # numba-jit way - saves about 50ms per render:
-        # sum_flat, count_flat = fast_bincount_avg(idx, v, n_dots)
-        # pure numpy way:
+        # numba-jit way - saves about 50ms per render: sum_flat, count_flat = fast_bincount_avg(idx, v, n_dots)
         sum_flat = np.bincount(idx, weights=v, minlength=n_dots)
         count_flat = np.bincount(idx, minlength=n_dots)
-        t2 = time.time() # JDS-Comment
-        print('3: '+'#'*round((t2-t1)*500)+f' {round((t2-t1) * 1000)}ms') # JDS-Comment
-    
-        t1 = time.time() # JDS-Comment
         dot_radii_sq = np.divide(sum_flat, count_flat, out=np.zeros_like(sum_flat, dtype=float), where=(count_flat != 0))
         dot_radii_sq = dot_radii_sq.reshape(dot_image_height, dot_image_width)
         dot_radii_sq = (dot_radii_sq * cmyk_pitches[cmyk_idx]) ** 2
         pixel_to_dot_radius_sq = dot_radii_sq[pixel_to_dot_coordinates[...,0], pixel_to_dot_coordinates[...,1]]
         t2 = time.time() # JDS-Comment
-        print('4: '+'#'*round((t2-t1)*500)+f' {round((t2-t1) * 1000)}ms') # JDS-Comment
+        print('3: '+'#'*round((t2-t1)*500)+f' {round((t2-t1) * 1000)}ms') # JDS-Comment
     
         t1 = time.time() # JDS-Comment
-        # pixel_to_dot_center_distance_sq = np.sum((pixel_to_pixel_coordinates - (pixel_to_dot_coords_rounded @ dot_to_pixel_transform.T))**2, axis=2)
-        # Compute in dot coordinate space (before rounding offset)
         dot_space_offset = pixel_to_dot_coords_float - pixel_to_dot_coords_rounded
-
-        # Convert dot-space distance to pixel-space distance
-        # Distance in pixel space = distance in dot space * pitch (since dot grid has spacing = pitch)
         pixel_to_dot_center_distance_sq = np.sum(dot_space_offset**2, axis=2) * (pitch**2)
         t2 = time.time() # JDS-Comment
-        print('5: '+'#'*round((t2-t1)*500)+f' {round((t2-t1) * 1000)}ms') # JDS-Comment
+        print('4: '+'#'*round((t2-t1)*500)+f' {round((t2-t1) * 1000)}ms') # JDS-Comment
 
         t1 = time.time() # JDS-Comment
         subtractive_image = np.zeros_like(new_rgb_array)
         subtractive_image[pixel_to_dot_radius_sq >= pixel_to_dot_center_distance_sq] = anti_colors[cmyk_idx]
         new_rgb_array -= subtractive_image
         t2 = time.time() # JDS-Comment
-        print('6: '+'#'*round((t2-t1)*500)+f' {round((t2-t1) * 1000)}ms') # JDS-Comment
+        print('5: '+'#'*round((t2-t1)*500)+f' {round((t2-t1) * 1000)}ms') # JDS-Comment
         print() # JDS-Comment
 
     return Image.fromarray((new_rgb_array * 255.0).astype(np.uint8), mode="RGB")
