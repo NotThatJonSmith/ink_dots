@@ -1,0 +1,165 @@
+#version 450
+layout (local_size_x = 16, local_size_y = 16) in;
+layout (binding = 0) buffer InputBuffer { uint data[]; } inputBuffer;
+layout (binding = 1) buffer OutputBuffer { uint data[]; } outputBuffer;
+layout (push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+    uint levels;
+    float black_ratio;
+    float edge_threshold;
+    float edge_sigma;
+    mat2 p2d_cyan_mat2;
+    mat2 p2d_magenta_mat2;
+    mat2 p2d_yellow_mat2;
+    mat2 p2d_black_mat2;
+    mat2 d2p_cyan_mat2;
+    mat2 d2p_magenta_mat2;
+    mat2 d2p_yellow_mat2;
+    mat2 d2p_black_mat2;
+} pc;
+
+// channel 0 = r, 1 = g, 2 = b
+uint levelized_channel_value(uint pixel, uint channel)
+ {
+    uint v = (pixel >> channel*8) & 0xFF;
+    float v01 = float(v) / 255.0;
+    uint v0n = uint(v01 * float(pc.levels));
+    uint v_levelized = uint(v0n * (255.0 / float(pc.levels - 1)));
+    return v_levelized;
+}
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x >= pc.width || y >= pc.height) return;
+    
+    // Get the dot-space coordinates for this pixel in each CMYK grid
+    vec2 cyan_dot_coords = pc.d2p_cyan_mat2 * vec2(float(x), float(y));
+    vec2 magenta_dot_coords = pc.d2p_magenta_mat2 * vec2(float(x), float(y));
+    vec2 yellow_dot_coords = pc.d2p_yellow_mat2 * vec2(float(x), float(y));
+    vec2 black_dot_coords = pc.d2p_black_mat2 * vec2(float(x), float(y));
+
+    // Round to get the dot-space coordinates of the centers of each CMYK dot we might be within
+    vec2 cyan_dot_center_coords = round(cyan_dot_coords);
+    vec2 magenta_dot_center_coords = round(magenta_dot_coords);
+    vec2 yellow_dot_center_coords = round(yellow_dot_coords);
+    vec2 black_dot_center_coords = round(black_dot_coords);
+
+    // Get the pixel coordinates at the centers of the CMYK dots we might be within
+    vec2 cyan_center_px_coords = pc.p2d_cyan_mat2 * cyan_dot_center_coords;
+    vec2 magenta_center_px_coords = pc.p2d_magenta_mat2 * magenta_dot_center_coords;
+    vec2 yellow_center_px_coords = pc.p2d_yellow_mat2 * yellow_dot_center_coords;
+    vec2 black_center_px_coords = pc.p2d_black_mat2 * black_dot_center_coords;
+
+    // Get the 1d buffer indices for those pixel coordinates
+    uint cyan_px_idx = uint(cyan_center_px_coords.y) * pc.width + uint(cyan_center_px_coords.x);
+    uint yellow_px_idx = uint(yellow_center_px_coords.y) * pc.width + uint(yellow_center_px_coords.x);
+    uint magenta_px_idx = uint(magenta_center_px_coords.y) * pc.width + uint(magenta_center_px_coords.x);
+    uint black_px_idx = uint(black_center_px_coords.y) * pc.width + uint(black_center_px_coords.x);
+    
+    // sample the image at the other pixel coords at the centers of the dots
+    uint cyan_pixel = inputBuffer.data[cyan_px_idx];
+    uint magenta_pixel = inputBuffer.data[magenta_px_idx];
+    uint yellow_pixel = inputBuffer.data[yellow_px_idx];
+    uint black_pixel = inputBuffer.data[black_px_idx];
+
+    // get levelized RGB channel values
+    uint r_levelized = levelized_channel_value(cyan_pixel, 0);
+    uint g_levelized = levelized_channel_value(magenta_pixel, 1);
+    uint b_levelized = levelized_channel_value(yellow_pixel, 2);
+    vec3 black_rgb_levelized = vec3(
+        levelized_channel_value(black_pixel, 0),
+        levelized_channel_value(black_pixel, 1),
+        levelized_channel_value(black_pixel, 2)
+    );
+    
+    // Convert levelized RGB to levelized CMYK
+    float cyan_value = 1.0 - float(r_levelized) / 255.0;
+    float magenta_value = 1.0 - float(g_levelized) / 255.0;
+    float yellow_value = 1.0 - float(b_levelized) / 255.0;
+    float black_value = 1.0 - max(max(float(black_rgb_levelized.r),
+                                      float(black_rgb_levelized.g)),
+                                      float(black_rgb_levelized.b)) / 255.0;
+    black_value *= pc.black_ratio;
+    cyan_value -= black_value;
+    magenta_value -= black_value;
+    yellow_value -= black_value;
+
+    // Distances from dot centers in dot space
+    float cyan_dot_dist = length(cyan_dot_coords - cyan_dot_center_coords);
+    float magenta_dot_dist = length(magenta_dot_coords - magenta_dot_center_coords);
+    float yellow_dot_dist = length(yellow_dot_coords - yellow_dot_center_coords);
+    float black_dot_dist = length(black_dot_coords - black_dot_center_coords);
+
+    // Radii of each dot in dot space
+    float cyan_radius = 1.0 * cyan_value;
+    float magenta_radius = 1.0 * magenta_value;
+    float yellow_radius = 1.0 * yellow_value;
+    float black_radius = 1.0 * black_value;
+
+    // Back to rgb
+    float final_r = 255.0;
+    float final_g = 255.0;
+    float final_b = 255.0;
+    if (black_dot_dist <= black_radius) {
+        final_r = 0;
+        final_g = 0;
+        final_b = 0;
+    }
+    if (cyan_dot_dist < cyan_radius) final_r = 0;
+    if (magenta_dot_dist < magenta_radius) final_g = 0;
+    if (yellow_dot_dist < yellow_radius) final_b = 0;
+
+    // Gaussian blur
+    int radius = int(ceil(3.0 * pc.edge_sigma));
+    float blurred = 0.0;
+    float weight_sum = 0.0;
+    for (int dy = -radius; dy <= radius; dy++) {
+        for (int dx = -radius; dx <= radius; dx++) {
+            int sample_x = int(x) + dx;
+            int sample_y = int(y) + dy;
+            if (sample_x >= 0 && sample_x < int(pc.width) && sample_y >= 0 && sample_y < int(pc.height)) {
+                uint sample_idx = uint(sample_y) * pc.width + uint(sample_x);
+                uint sample_pixel = inputBuffer.data[sample_idx];
+                vec3 sample_rgb = vec3(float((sample_pixel >> 0) & 0xFF), float((sample_pixel >> 8) & 0xFF), float((sample_pixel >> 16) & 0xFF));
+                float sample_gray = dot(sample_rgb, vec3(0.2989, 0.5870, 0.1140));
+                float dist_sq = float(dx * dx + dy * dy);
+                float weight = exp(-dist_sq / (2.0 * pc.edge_sigma * pc.edge_sigma));
+                blurred += sample_gray * weight;
+                weight_sum += weight;
+            }
+        }
+    }
+    blurred /= weight_sum;
+    
+    // Sobel edge detection
+    float grad_x = 0.0;
+    float grad_y = 0.0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            int sample_x = int(x) + dx;
+            int sample_y = int(y) + dy;
+            if (sample_x >= 0 && sample_x < int(pc.width) && sample_y >= 0 && sample_y < int(pc.height)) {
+                uint sample_idx = uint(sample_y) * pc.width + uint(sample_x);
+                uint sample_pixel = inputBuffer.data[sample_idx];
+                vec3 sample_rgb = vec3(float((sample_pixel >> 0) & 0xFF), float((sample_pixel >> 8) & 0xFF), float((sample_pixel >> 16) & 0xFF));
+                float sample_gray = dot(sample_rgb, vec3(0.2989, 0.5870, 0.1140));
+                // Sobel kernels
+                float sobel_x_weight = float(dx) * (abs(dy) == 1 ? 1.0 : 2.0);
+                float sobel_y_weight = float(dy) * (abs(dx) == 1 ? 1.0 : 2.0);
+                grad_x += sample_gray * sobel_x_weight;
+                grad_y += sample_gray * sobel_y_weight;
+            }
+        }
+    }
+    
+    float gradient_magnitude = sqrt(grad_x * grad_x + grad_y * grad_y);
+    if (gradient_magnitude > pc.edge_threshold*255.0) {
+        final_r = 0.0;
+        final_g = 0.0;
+        final_b = 0.0;
+    }
+
+    outputBuffer.data[y * pc.width + x] = uint(final_r) | (uint(final_g) << 8) | (uint(final_b) << 16) | (0xFF << 24);
+}

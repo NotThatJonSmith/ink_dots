@@ -37,7 +37,6 @@ def render(image):
     edge_sigma = 2.0 # Ink-blottyness of the pen lines sorta
     rgb = np.ascontiguousarray(image).astype(np.float32) / 255.0
     rgb_levelized = np.floor(rgb * levels) / (levels - 1)
-    # Extract text then overlay at the end. OCR + font recognition...?
     k_image = (1 - np.max(rgb_levelized, axis=2)) * black_ratio
     c_image, m_image, y_image = (1 - rgb_levelized[...,0] - k_image), (1 - rgb_levelized[...,1] - k_image), (1 - rgb_levelized[...,2] - k_image)
     cmyk_images = [c_image, m_image, y_image, k_image]
@@ -64,7 +63,6 @@ def render(image):
         subtractive_image.fill(0)  # Reset to zeros
         subtractive_image[pixel_to_dot_radius_sq >= pixel_to_dot_center_distance_sq] = anti_colors[cmyk_idx]
         new_rgb_array -= subtractive_image
-    # Now a canny edge detector to paint rich black lines
     gray_image = np.dot(rgb, [0.2989, 0.5870, 0.1140])
     blurred = gaussian_filter(gray_image, sigma=edge_sigma)
     sobel_x = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
