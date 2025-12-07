@@ -6,6 +6,8 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
 
+// TODO: I highly suspect I'm doing too much vulkan work here. Probably duplicated "graphics" and "compute" resources
+
 #include "build/levelize.comp.spv.h" // Include the compiled shader bytecode
 
 int main(int argc, char** argv) {
@@ -123,6 +125,10 @@ int main(int argc, char** argv) {
     // Copy image_data (CPU) to Vulkan buffer (GPU) and free image data
     memcpy(input_data, imageData, bufferSize);
     stbi_image_free(imageData);
+
+    // ADD THIS: Unmap before GPU accesses it
+    vkUnmapMemory(device, inputBufferMemory);
+    vkUnmapMemory(device, outputBufferMemory);
 
     // Create a command "pool"
     VkCommandPoolCreateInfo poolInfo{};
@@ -247,119 +253,21 @@ int main(int argc, char** argv) {
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
     
-    float cmyk_angles[4] = {15.0f, 75.0f, 1.0f, 45.0f};
-    float cmyk_pitches[4] = {5.0f, 5.0f, 5.0f, 5.0f};
-    float black_ratio = 0.05f;
-    int color_levels_per_channel = 7;
-    float edge_threshold = 0.3f;
-    float edge_sigma = 2.0f;
-
-    float dot_to_pixel_transforms[4][2][2];
-    for (int i = 0; i < 4; i++) {
-        float angle_rad = cmyk_angles[i] * 3.14159265f / 180.0f;
-        float cos_a = cosf(angle_rad);
-        float sin_a = sinf(angle_rad);
-        dot_to_pixel_transforms[i][0][0] = cmyk_pitches[i] * cos_a; 
-        dot_to_pixel_transforms[i][0][1] = -cmyk_pitches[i] * sin_a;
-        dot_to_pixel_transforms[i][1][0] = cmyk_pitches[i] * sin_a;
-        dot_to_pixel_transforms[i][1][1] = cmyk_pitches[i] * cos_a;
-    }
-
-    // pixel_to_dot_transforms = [x.T for x in np.linalg.inv(dot_to_pixel_transforms)]
-    float pixel_to_dot_transforms[4][2][2];
-    for (int i = 0; i < 4; i++) {
-        float a = dot_to_pixel_transforms[i][0][0];
-        float b = dot_to_pixel_transforms[i][0][1];
-        float c = dot_to_pixel_transforms[i][1][0];
-        float d = dot_to_pixel_transforms[i][1][1];
-        float det = a * d - b * c;
-        pixel_to_dot_transforms[i][0][0] =  d / det;
-        pixel_to_dot_transforms[i][0][1] = -b / det;
-        pixel_to_dot_transforms[i][1][0] = -c / det;
-        pixel_to_dot_transforms[i][1][1] =  a / det;
-    }
-    
-    float p2d_cyan_mat2[4] = {
-        pixel_to_dot_transforms[0][0][0],
-        pixel_to_dot_transforms[0][0][1],
-        pixel_to_dot_transforms[0][1][0],
-        pixel_to_dot_transforms[0][1][1]
-    };
-    float p2d_magenta_mat2[4] = {
-        pixel_to_dot_transforms[1][0][0],
-        pixel_to_dot_transforms[1][0][1],
-        pixel_to_dot_transforms[1][1][0],
-        pixel_to_dot_transforms[1][1][1]
-    };
-    float p2d_yellow_mat2[4] = {
-        pixel_to_dot_transforms[2][0][0],
-        pixel_to_dot_transforms[2][0][1],
-        pixel_to_dot_transforms[2][1][0],
-        pixel_to_dot_transforms[2][1][1]
-    };
-    float p2d_black_mat2[4] = {
-        pixel_to_dot_transforms[3][0][0],
-        pixel_to_dot_transforms[3][0][1],
-        pixel_to_dot_transforms[3][1][0],
-        pixel_to_dot_transforms[3][1][1]
-    };
-    float d2p_cyan_mat2[4] = {
-        dot_to_pixel_transforms[0][0][0],
-        dot_to_pixel_transforms[0][0][1],
-        dot_to_pixel_transforms[0][1][0],
-        dot_to_pixel_transforms[0][1][1]
-    };
-    float d2p_magenta_mat2[4] = {
-        dot_to_pixel_transforms[1][0][0],
-        dot_to_pixel_transforms[1][0][1],
-        dot_to_pixel_transforms[1][1][0],
-        dot_to_pixel_transforms[1][1][1]
-    };
-    float d2p_yellow_mat2[4] = {
-        dot_to_pixel_transforms[2][0][0],
-        dot_to_pixel_transforms[2][0][1],
-        dot_to_pixel_transforms[2][1][0],
-        dot_to_pixel_transforms[2][1][1]
-    };
-    float d2p_black_mat2[4] = {
-        dot_to_pixel_transforms[3][0][0],
-        dot_to_pixel_transforms[3][0][1],
-        dot_to_pixel_transforms[3][1][0],
-        dot_to_pixel_transforms[3][1][1]
-    };
-
     // Push image dimensions to shader
     struct PushConstants {
         uint32_t width;
         uint32_t height;
-        uint32_t colorLevels;
-        float black_ratio;
-        float edge_threshold;
-        float edge_sigma;
-        float p2d_cyan_mat2[4];
-        float p2d_magenta_mat2[4];
-        float p2d_yellow_mat2[4];
-        float p2d_black_mat2[4];
-        float d2p_cyan_mat2[4];
-        float d2p_magenta_mat2[4];
-        float d2p_yellow_mat2[4];
-        float d2p_black_mat2[4];
+        uint32_t colorLevels = 8;
+        float black_ratio = 0.05f;
+        float dot_size_factor = 0.7f;
+        float edge_threshold = 0.3f;
+        float edge_sigma = 2.0f;
+        float cmyk_angles[4] = {15.0f, 75.0f, 1.0f, 45.0f};
+        float cmyk_pitches[4] = {5.0f, 5.0f, 5.0f, 5.0f};
     } pushConstants;
     
     pushConstants.width = static_cast<uint32_t>(imageWidth);
     pushConstants.height = static_cast<uint32_t>(imageHeight);
-    pushConstants.colorLevels = color_levels_per_channel;
-    pushConstants.black_ratio = black_ratio;
-    pushConstants.edge_threshold = edge_threshold;
-    pushConstants.edge_sigma = edge_sigma;
-    memcpy(pushConstants.p2d_cyan_mat2, p2d_cyan_mat2, sizeof(p2d_cyan_mat2));
-    memcpy(pushConstants.p2d_magenta_mat2, p2d_magenta_mat2, sizeof(p2d_magenta_mat2));
-    memcpy(pushConstants.p2d_yellow_mat2, p2d_yellow_mat2, sizeof(p2d_yellow_mat2));
-    memcpy(pushConstants.p2d_black_mat2, p2d_black_mat2, sizeof(p2d_black_mat2));
-    memcpy(pushConstants.d2p_cyan_mat2, d2p_cyan_mat2, sizeof(d2p_cyan_mat2));
-    memcpy(pushConstants.d2p_magenta_mat2, d2p_magenta_mat2, sizeof(d2p_magenta_mat2));
-    memcpy(pushConstants.d2p_yellow_mat2, d2p_yellow_mat2, sizeof(d2p_yellow_mat2));
-    memcpy(pushConstants.d2p_black_mat2, d2p_black_mat2, sizeof(d2p_black_mat2));
     
     vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
     
@@ -377,6 +285,8 @@ int main(int argc, char** argv) {
     vkQueueSubmit(computeQueue, 1, &submitInfo, VK_NULL_HANDLE);
     vkQueueWaitIdle(computeQueue);
 
+    // Re-map to read results
+    vkMapMemory(device, outputBufferMemory, 0, bufferSize, 0, &output_data);
     
     // Save the processed image
     unsigned char* newImageData = (unsigned char*)malloc(bufferSize);
